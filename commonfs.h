@@ -1,6 +1,7 @@
 #ifndef _COMMONFS_H
 #define _COMMONFS_H
 #include <fuse.h>
+#include <pthread.h>
 
 typedef enum { false, true } bool;
 #define MAX_PATH_SIZE (1024 + 256 + 3)
@@ -41,6 +42,14 @@ typedef enum { false, true } bool;
   (void)(&_min1 == &_min2);      \
   _min1 < _min2 ? _min1 : _min2; })
 
+typedef struct progressive_data_buf {
+  const char *readptr;
+  size_t sizeleft;
+  bool upload_completed;
+  bool write_completed;
+  pthread_t thread;
+}progressive_data_buf;
+
 //linked list with files in a directory
 typedef struct dir_entry
 {
@@ -49,17 +58,18 @@ typedef struct dir_entry
   char *content_type;
   off_t size;
   time_t last_modified;
-  // implement utimens
+  // additional attributes
   struct timespec mtime;
   struct timespec ctime;
   struct timespec atime;
-  char *md5sum; //interesting capability for rsync/scrub
+  char *md5sum;
   mode_t chmod;
   uid_t uid;
   gid_t gid;
 	bool issegmented;
 	time_t accessed_in_cache;//todo: cache support based on access time
   bool metadata_downloaded;
+  struct progressive_data_buf upload_buf;
   // end change
   int isdir;
   int islink;
@@ -104,6 +114,7 @@ void dir_decache(const char *path);
 void cloudfs_free_dir_list(dir_entry *dir_list);
 extern int cloudfs_list_directory(const char *path, dir_entry **);
 int caching_list_directory(const char *path, dir_entry **list);
+void sleep_ms(int milliseconds);
 
 char *get_home_dir();
 void cloudfs_debug(int dbg);

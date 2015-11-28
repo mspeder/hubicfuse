@@ -42,6 +42,8 @@ typedef struct extra_options {
   char curl_progress_state[OPTION_SIZE];
   char enable_chmod[OPTION_SIZE];
   char enable_chown[OPTION_SIZE];
+  char enable_progressive_upload[OPTION_SIZE];
+  char enable_progressive_download[OPTION_SIZE];
 } ExtraFuseOptions;
 
 void cloudfs_init(void);
@@ -83,4 +85,5 @@ void cloudfs_option_get_extended_metadata(int option);
 void cloudfs_option_curl_verbose(int option);
 void get_file_metadata(dir_entry *de);
 int cloudfs_update_meta(dir_entry *de);
+void cloudfs_object_read_progressive(const char *path);
 #endif

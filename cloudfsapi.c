@@ -50,6 +50,8 @@ extern int option_cache_statfs_timeout;
 extern bool option_extensive_debug;
 extern bool option_enable_chown;
 extern bool option_enable_chmod;
+extern bool option_enable_progressive_upload;
+extern bool option_enable_progressive_download;
 
 static int rhel5_mode = 0;
 static struct statvfs statcache = {
@@ -325,6 +327,43 @@ size_t writefunc_callback(void *contents, size_t size, size_t nmemb, void *userp
   return realsize;
 }
 
+// provides progressive data on upload for PUT/POST
+static size_t progressive_read_callback(void *ptr, size_t size, size_t nmemb, void *userp)
+{
+  dir_entry *de = (dir_entry*)userp;
+  debugf(DBG_LEVEL_EXTALL, KMAG"progressive_read_callback: entering for path(%s) size=%lu nmemb=%lu", de->full_name, size, nmemb);
+  struct progressive_data_buf *upload_buf = &de->upload_buf;
+  
+
+  if (size*nmemb < 1) {
+    debugf(DBG_LEVEL_EXT, KYEL"progressive_read_callback: exit as size*nmemb < 1");
+    return 0;
+  }
+  if (upload_buf == NULL) {
+    debugf(DBG_LEVEL_NORM, KRED"progressive_read_callback: got NULL data buffer");
+    return 0;
+  }
+  upload_buf->upload_completed = false;
+  size_t max_size_to_upload;
+
+  while (upload_buf->write_completed == false) {
+    max_size_to_upload = min(size*nmemb, de->upload_buf.sizeleft);
+    if (upload_buf->sizeleft) {
+      *(char *) ptr = upload_buf->readptr[0];
+      upload_buf->readptr += max_size_to_upload;
+      upload_buf->sizeleft -= max_size_to_upload;
+      debugf(DBG_LEVEL_EXTALL, KMAG"progressive_read_callback: feed for upload data size=%lu", max_size_to_upload);
+      return max_size_to_upload;
+    }
+    
+    //debugf(DBG_LEVEL_EXTALL, KMAG "progressive_read_callback: wait for more data from fuse, max_size_upload=%lu", max_size_to_upload);
+    sleep_ms(1);
+  }
+  debugf(DBG_LEVEL_EXT, KMAG "progressive_read_callback: full file upload completed");
+  upload_buf->upload_completed = true;
+  return 0;                          /* no more data left to deliver */
+}
+
 // de_cached_entry must be NULL when the file is already in global cache
 // otherwise point to a new dir_entry that will be added to the cache (usually happens on first dir load)
 static int send_request_size(const char *method, const char *path, void *fp,
@@ -387,7 +426,7 @@ static int send_request_size(const char *method, const char *path, void *fp,
 			debugf(DBG_LEVEL_EXTALL, "send_request_size: using param dir_entry(%s)", orig_path);
 		}
 		if (!de) {
-			debugf(DBG_LEVEL_EXTALL, "send_request_size: "KYEL"file not in cache (%s)(%s)(%s)", orig_path, path, unencoded_path);
+			debugf(DBG_LEVEL_EXTALL, "send_request_size: "KRED"file not in cache (%s)(%s)(%s)", orig_path, path, unencoded_path);
 		}
     else {
       // add headers to save utimens attribs only on upload
@@ -446,22 +485,41 @@ static int send_request_size(const char *method, const char *path, void *fp,
       curl_easy_setopt(curl, CURLOPT_READDATA, fp);
       add_header(&headers, "Content-Type", "application/link");
     }
-    //this condition does not include copy-to PUT action as it does not have a FP
-    //else if (!strcasecmp(method, "PUT") && fp)
-    else if (!strcasecmp(method, "PUT"))
-    {
+    else if (!strcasecmp(method, "PUT")) {
+      //todo: read response headers and update file meta (etag & last-modified)
+
       //http://blog.chmouel.com/2012/02/06/anatomy-of-a-swift-put-query-to-object-server/
-      debugf(DBG_LEVEL_EXT, "send_request_size: PUT (%s)", orig_path);
-      curl_easy_setopt(curl, CURLOPT_UPLOAD, 1);
-      if (fp) {
-        curl_easy_setopt(curl, CURLOPT_INFILESIZE, file_size);
-        curl_easy_setopt(curl, CURLOPT_READDATA, fp);
+      debugf(DBG_LEVEL_EXT, "send_request_size: PUT (%s) size=%lu", orig_path, file_size);
+
+      
+      //don't do progressive on file creation, when size=0
+      //http://curl.haxx.se/libcurl/c/post-callback.html
+      if (option_enable_progressive_upload && file_size > 0) {
+        //curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_UPLOAD, 1); //1=upload
+        debugf(DBG_LEVEL_EXT, "send_request_size: progressive PUT (%s)", orig_path);
+        //todo: placeholder to init progressing upload of a local file
+        curl_easy_setopt(curl, CURLOPT_READFUNCTION, progressive_read_callback);
+        curl_easy_setopt(curl, CURLOPT_READDATA, (void*)de);
+        //add_header(&headers, "Transfer-Encoding", "chunked");
       }
       else {
-        curl_easy_setopt(curl, CURLOPT_INFILESIZE, 0);
+        curl_easy_setopt(curl, CURLOPT_UPLOAD, 1); //1=upload
+        if (fp) {
+          curl_easy_setopt(curl, CURLOPT_INFILESIZE, file_size);
+          debugf(DBG_LEVEL_EXT, "send_request_size: standard bulk PUT or create file (%s)", orig_path);
+          curl_easy_setopt(curl, CURLOPT_READDATA, fp);
+        }
+        else {
+          debugf(DBG_LEVEL_EXT, "send_request_size: 0 content PUT, for updating meta (%s)", orig_path);
+          curl_easy_setopt(curl, CURLOPT_INFILESIZE, 0);
+        }
       }
-      if (is_segment)
+      if (is_segment) {
+        //fixme: progressive upload not working if file is segmented
+        debugf(DBG_LEVEL_EXT, "send_request_size(%s): PUT is segmented, "KYEL"readcallback used", orig_path);
         curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_callback);
+      }
       //enable progress reporting
       //http://curl.haxx.se/libcurl/c/progressfunc.html
       struct curl_progress prog;
@@ -909,7 +967,18 @@ const char * get_file_mimetype ( const char *path )
   return error;
 }
 
+//progressive upload to cloud, works only for not segmented files
+void cloudfs_object_read_progressive(const char *path) {
+  debugf(DBG_LEVEL_EXT, "cloudfs_object_read_progressive(%s)", path);
+  char *encoded = curl_escape(path, 0);
+  //mark file size = 1 to signal we have some data coming in
+  int response = send_request_size("PUT", encoded, NULL, NULL, NULL, 1, 0, NULL, path);
+  curl_free(encoded);
+  debugf(DBG_LEVEL_EXT, "exit: cloudfs_object_read_progressive(%s)", path);
+  //return (response >= 200 && response < 300);
+}
 
+//uploads file to cloud
 int cloudfs_object_read_fp(const char *path, FILE *fp)
 {
   debugf(DBG_LEVEL_EXT, "cloudfs_object_read_fp(%s)", path);

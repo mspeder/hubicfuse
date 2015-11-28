@@ -30,6 +30,8 @@ extern bool option_curl_progress_state;
 extern bool option_enable_chown;
 extern bool option_enable_chmod;
 extern size_t file_buffer_size;
+extern bool option_enable_progressive_upload;
+extern bool option_enable_progressive_download;
 
 typedef struct
 {
@@ -372,40 +374,52 @@ static int cfs_flush(const char *path, struct fuse_file_info *info)
 	int errsv = 0;
 
   if (of) {
-    update_dir_cache(path, cloudfs_file_size(of->fd), 0, 0);
+    off_t file_size = cloudfs_file_size(of->fd);
+    update_dir_cache(path, file_size, 0, 0);
     if (of->flags & O_RDWR || of->flags & O_WRONLY) {
       FILE *fp = fdopen(dup(of->fd), "r");
 			errsv = errno;
 			if (fp != NULL) {
-				rewind(fp);
-        //todo: calculate md5 hash, compare with cloud hash to determine if file content is changed
-        char md5_file_hash_str[MD5_DIGEST_LENGTH + 1] = "\0";
-        file_md5(fp, md5_file_hash_str);
         dir_entry *de = check_path_info(path);
-        if (de && de->md5sum != NULL && (!strcasecmp(md5_file_hash_str, de->md5sum))) {
-          //file content is identical, no need to upload entire file, just update metadata
-          debugf(DBG_LEVEL_NORM, KBLU "cfs_flush(%s): skip full upload as content did not change", path);
-          cloudfs_update_meta(de);
+        //on progressive ops upload is already done
+        if (option_enable_progressive_upload && file_size > 0) {
+          debugf(DBG_LEVEL_EXT, KMAG"cfs_flush(%s): progressive ops completed, size=%lu", path, file_size);
+          //signal completion of read/write operation
+          de->upload_buf.write_completed = true;
+          fclose(fp);
+          errsv = 0;
         }
         else {
           rewind(fp);
-          debugf(DBG_LEVEL_NORM, KBLU "cfs_flush(%s): perform full upload as content changed (or no file found in cache)", path);
-          if (!cloudfs_object_read_fp(path, fp)) {
-            fclose(fp);
-            errsv = errno;
-            debugf(DBG_LEVEL_NORM, KRED"exit 0: cfs_flush(%s) result=%d:%s", path, errsv, strerror(errno));
-            return -ENOENT;
+          //todo: calculate md5 hash, compare with cloud hash to determine if file content is changed
+          char md5_file_hash_str[MD5_DIGEST_LENGTH + 1] = "\0";
+          file_md5(fp, md5_file_hash_str);
+
+          if (de && de->md5sum != NULL && (!strcasecmp(md5_file_hash_str, de->md5sum))) {
+            //file content is identical, no need to upload entire file, just update metadata
+            debugf(DBG_LEVEL_NORM, KBLU "cfs_flush(%s): skip full upload as content did not change", path);
+            cloudfs_update_meta(de);
           }
+          else {
+            rewind(fp);
+            debugf(DBG_LEVEL_NORM, KBLU "cfs_flush(%s): perform full upload as content changed (or no file found in cache)", path);
+            if (!cloudfs_object_read_fp(path, fp)) {
+              fclose(fp);
+              errsv = errno;
+              debugf(DBG_LEVEL_NORM, KRED"exit 0: cfs_flush(%s) result=%d:%s", path, errsv, strerror(errsv));
+              return -ENOENT;
+            }
+          }
+          fclose(fp);
+          errsv = errno;
         }
-				fclose(fp);
-				errsv = errno;
 			}
 			else {
-				debugf(DBG_LEVEL_EXT, KRED "status: cfs_flush, err=%d:%s", errsv, strerror(errno));
+				debugf(DBG_LEVEL_EXT, KRED "status: cfs_flush, err=%d:%s", errsv, strerror(errsv));
 			}
     }
   }
-	debugf(DBG_LEVEL_NORM, KBLU "exit 1: cfs_flush(%s) result=%d:%s", path, errsv, strerror(errno));
+	debugf(DBG_LEVEL_NORM, KBLU "exit 1: cfs_flush(%s) result=%d:%s", path, errsv, strerror(errsv));
 	return 0;
 }
 
@@ -448,12 +462,38 @@ static int cfs_ftruncate(const char *path, off_t size, struct fuse_file_info *in
 
 static int cfs_write(const char *path, const char *buf, size_t length, off_t offset, struct fuse_file_info *info)
 {
-  debugf(DBG_LEVEL_EXTALL, KBLU "cfs_write(%s) bufflength=%lu offset=%lu", path, length, offset);
+  debugf(DBG_LEVEL_EXTALL, KBLU "cfs_write(%s) bufflength=%lu offset=%lu *buf=%lu", path, length, offset, buf);
   // FIXME: Potential inconsistent cache update if pwrite fails?
   update_dir_cache(path, offset + length, 0, 0);
-	//int result = pwrite(info->fh, buf, length, offset);
+  //writes to local cache file
 	int result = pwrite(((openfile *)(uintptr_t)info->fh)->fd, buf, length, offset);
 	int errsv = errno;
+  //todo: send data also to progressive upload buffer and wait until this data chunck is uploaded, to show real upload progress
+  // fixme: prior check of md5sum not done here, upload optimisation not functional
+  if (option_enable_progressive_upload) {
+    dir_entry *de = check_path_info(path);
+    if (de) {
+      //wait until buffer is uploaded from previous write call
+      while (offset != 0 && de->upload_buf.sizeleft > 0) {
+        //debugf(DBG_LEVEL_EXTALL, KMAG "cfs_write(%s): wait for curl to upload, size_left=%lu", path, de->upload_buf.sizeleft);
+        sleep_ms(1);
+      }
+      de->upload_buf.write_completed = false;
+      de->upload_buf.readptr = buf;
+      de->upload_buf.sizeleft = length;
+      if (offset == 0) {
+        //start upload op with a new thread
+        char path_copy[MAX_PATH_SIZE] = "";
+        strcpy(path_copy, path);
+        debugf(DBG_LEVEL_EXT, KMAG "cfs_write(%s) start upload thread buflen=%lu", path_copy, length);
+        pthread_create(&de->upload_buf.thread, NULL, (void*)cloudfs_object_read_progressive, path_copy);
+      }
+      debugf(DBG_LEVEL_EXTALL, KMAG "cfs_write(%s): upload buf done", path);
+    }
+    else {
+      debugf(DBG_LEVEL_EXT, "cfs_write(%s):"KRED" unexpected missing path from cache on progressive write", path);
+    }
+  }
   if (errsv == 0) {
     debugf(DBG_LEVEL_EXTALL, KBLU "exit 0: cfs_write(%s) result=%d:%s", path, errsv, strerror(errsv));
   }
@@ -522,6 +562,7 @@ static int cfs_chown(const char *path, uid_t uid, gid_t gid)
       int response = cloudfs_update_meta(de);
     }
   }
+  debugf(DBG_LEVEL_NORM, KBLU "exit: cfs_chown(%s,%d,%d)", path, uid, gid);
   return 0;
 }
 
@@ -537,6 +578,7 @@ static int cfs_chmod(const char *path, mode_t mode)
       int response = cloudfs_update_meta(de);
     }
   }
+  debugf(DBG_LEVEL_NORM, KBLU"exit: cfs_chmod(%s,%d)", path, mode);
   return 0;
 }
 
@@ -695,7 +737,9 @@ ExtraFuseOptions extra_options = {
   .debug_level = 0,
   .curl_progress_state = "false",
   .enable_chown = "false",
-  .enable_chmod = "false"
+  .enable_chmod = "false",
+  .enable_progressive_upload = "false",
+  .enable_progressive_download = "false"
 };
 
 int parse_option(void *data, const char *arg, int key, struct fuse_args *outargs)
@@ -717,7 +761,9 @@ int parse_option(void *data, const char *arg, int key, struct fuse_args *outargs
     sscanf(arg, " debug_level = %[^\r\n ]", extra_options.debug_level) ||
     sscanf(arg, " curl_progress_state = %[^\r\n ]", extra_options.curl_progress_state) ||
     sscanf(arg, " enable_chmod = %[^\r\n ]", extra_options.enable_chmod) ||
-    sscanf(arg, " enable_chown = %[^\r\n ]", extra_options.enable_chown)
+    sscanf(arg, " enable_chown = %[^\r\n ]", extra_options.enable_chown) ||
+    sscanf(arg, " enable_progressive_download = %[^\r\n ]", extra_options.enable_progressive_download) ||
+    sscanf(arg, " enable_progressive_upload = %[^\r\n ]", extra_options.enable_progressive_upload)
 		)
     return 0;
   if (!strcmp(arg, "-f") || !strcmp(arg, "-d") || !strcmp(arg, "debug"))
@@ -754,6 +800,12 @@ void initialise_options() {
   }
   if (*extra_options.enable_chown) {
     option_enable_chown = !strcasecmp(extra_options.enable_chown, "true");
+  }
+  if (*extra_options.enable_progressive_download) {
+    option_enable_progressive_download = !strcasecmp(extra_options.enable_progressive_download, "true");
+  }
+  if (*extra_options.enable_progressive_upload) {
+    option_enable_progressive_upload = !strcasecmp(extra_options.enable_progressive_upload, "true");
   }
 }
 
@@ -809,6 +861,8 @@ int main(int argc, char **argv)
 		fprintf(stderr, "  debug_level=[0 to 3, 0 for minimal verbose debugging. No debug if -d or -f option is not provided.]\n");
     fprintf(stderr, "  enable_chmod=[true to enable chmod support on fuse]\n");
     fprintf(stderr, "  enable_chown=[true to enable chown support on fuse]\n");
+    fprintf(stderr, "  enable_progressive_download=[true to enable progressive operation support]\n");
+    fprintf(stderr, "  enable_progressive_upload=[true to enable progressive operation support]\n");
 		
     return 1;
   }
@@ -820,6 +874,8 @@ int main(int argc, char **argv)
   fprintf(stderr, "curl_progress_state = %d\n", option_curl_progress_state);
   fprintf(stderr, "enable_chmod = %d\n", option_enable_chmod);
   fprintf(stderr, "enable_chown = %d\n", option_enable_chown);
+  fprintf(stderr, "enable_progressive_download = %d\n", option_enable_progressive_download);
+  fprintf(stderr, "enable_progressive_upload = %d\n", option_enable_progressive_upload);
   cloudfs_set_credentials(options.client_id, options.client_secret, options.refresh_token);
 
   if (!cloudfs_connect())

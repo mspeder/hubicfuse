@@ -38,6 +38,8 @@ int option_debug_level = 0;
 int option_curl_progress_state = 1;//1 to disable curl progress
 bool option_enable_chown = false;
 bool option_enable_chmod = false;
+bool option_enable_progressive_upload = false;
+bool option_enable_progressive_download = false;
 size_t file_buffer_size = 0;
 
 // needed to get correct GMT / local time, as it does not work
@@ -298,6 +300,7 @@ void cloudfs_free_dir_list(dir_entry *dir_list)
 		free(de->content_type);
 		//TODO free all added fields
 		free(de->md5sum);
+    //no need to free de->upload_buf.readptr as it is only a pointer to a buffer allocated / managed by fuse
 		free(de);
 	}
 }
@@ -370,6 +373,8 @@ dir_entry* init_dir_entry() {
   de->chmod = 0;
   de->gid = 0;
   de->uid = 0;
+  de->upload_buf.upload_completed = false;
+  de->upload_buf.write_completed = false;
 	return de;
 }
 
@@ -381,6 +386,9 @@ void copy_dir_entry(dir_entry *src, dir_entry *dst) {
 	dst->ctime.tv_sec = src->ctime.tv_sec;
 	dst->ctime.tv_nsec = src->ctime.tv_nsec;
 	dst->chmod = src->chmod;
+  if (src->md5sum != NULL) {
+    //TODO: copy md5sum
+  }
 	//dst->md5sum = src->md5sum;
 }
 	
@@ -594,6 +602,17 @@ dir_entry *check_path_info(const char *path)
 	return NULL;
 }
 
+void sleep_ms(int milliseconds) 
+{
+#ifdef _POSIX_C_SOURCE
+  struct timespec ts;
+  ts.tv_sec = milliseconds / 1000;
+  ts.tv_nsec = (milliseconds % 1000) * 1000000;
+  nanosleep(&ts, NULL);
+#else
+  usleep(milliseconds * 1000);
+#endif
+}
 
 char *get_home_dir()
 {

@@ -23,7 +23,6 @@
 #include "commonfs.h"
 #include "cloudfsapi.h"
 #include "config.h"
-#include <fuse.h>
 
 #define RHEL5_LIBCURL_VERSION 462597
 #define RHEL5_CERTIFICATE_FILE "/etc/pki/tls/certs/ca-bundle.crt"

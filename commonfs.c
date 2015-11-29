@@ -17,7 +17,6 @@
 #include <sys/syscall.h>
 #include <openssl/md5.h>
 #include <pwd.h>
-#include <fuse.h>
 #include <limits.h>
 #include <curl/curl.h>
 #include <curl/easy.h>

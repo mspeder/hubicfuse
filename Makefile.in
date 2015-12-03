@@ -11,7 +11,7 @@ prefix = @prefix@
 exec_prefix = @exec_prefix@
 bindir = $(DESTDIR)$(exec_prefix)/bin
 
-SOURCES=cloudfsapi.c cloudfuse.c commonfs.c
+OBJECTS=cloudfsapi.o cloudfuse.o commonfs.o
 HEADERS=cloudfsapi.h commonfs.h
 
 all: hubicfuse
@@ -24,9 +24,12 @@ uninstall:
 
 $(bindir):
 	$(MKDIR_P) $(bindir)
+	
+%.o: %.c
+		$(CC) -c -o $@ $< $(CFLAGS)
 
-hubicfuse: $(SOURCES) $(HEADERS)
-	$(CC) $(CFLAGS) -o hubicfuse $(SOURCES) $(LIBS) $(LDFLAGS)
+hubicfuse: $(OBJECTS) $(HEADERS)
+	$(CC) $(CFLAGS) -o hubicfuse $(OBJECTS) $(LIBS) $(LDFLAGS)
 
 clean:
 	/bin/rm -f hubicfuse
@@ -54,4 +57,3 @@ Makefile: Makefile.in config.status
 	./config.status
 config.status: configure
 	./config.status --recheck
-

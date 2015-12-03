@@ -5,6 +5,7 @@ config.log
 config.status
 
 # Binary outputs
+*.o
 cloudfuse
 hubicfuse
 

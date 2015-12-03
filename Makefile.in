@@ -32,7 +32,7 @@ hubicfuse: $(OBJECTS) $(HEADERS)
 	$(CC) $(CFLAGS) -o hubicfuse $(OBJECTS) $(LIBS) $(LDFLAGS)
 
 clean:
-	/bin/rm -f hubicfuse
+	/bin/rm -f hubicfuse $(OBJECTS)
 
 distclean: clean
 	/bin/rm -f Makefile config.h config.status config.cache config.log \

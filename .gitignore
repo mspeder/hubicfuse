@@ -3,8 +3,11 @@ Makefile
 config.h
 config.log
 config.status
+aclocal.m4
+autom4te.cache
+stamp-h*
 
 # Binary outputs
-*.o
+.build
 cloudfuse
 hubicfuse

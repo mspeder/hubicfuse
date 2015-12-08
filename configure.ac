@@ -8,6 +8,7 @@ AC_LANG([C])
 AC_CONFIG_SRCDIR([cloudfuse.c])
 AC_CONFIG_HEADER([config.h])
 AC_CONFIG_FILES([Makefile])
+AC_CONFIG_FILES([stamp-h:], [echo timestamp > stamp-h])
 
 # Checks for programs.
 AC_PROG_CC

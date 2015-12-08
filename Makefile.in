@@ -7,12 +7,14 @@ LDFLAGS = @LDFLAGS@
 LIBS = @LIBS@ @XML_LIBS@ @CURL_LIBS@ @FUSE_LIBS@ @OPENSSL_LIBS@ @JSON_LIBS@ -lmagic
 INSTALL = @INSTALL@
 MKDIR_P = @MKDIR_P@
+OBJDIR := .build
 prefix = @prefix@
 exec_prefix = @exec_prefix@
 bindir = $(DESTDIR)$(exec_prefix)/bin
 
-OBJECTS=cloudfsapi.o cloudfuse.o commonfs.o
-HEADERS=cloudfsapi.h commonfs.h
+SRC = $(wildcard *.c)
+OBJS = $(SRC:%.c=$(OBJDIR)/%.o)
+DEPS = $(SRC:%.c=$(OBJDIR)/%.d)
 
 all: hubicfuse
 
@@ -25,18 +27,23 @@ uninstall:
 $(bindir):
 	$(MKDIR_P) $(bindir)
 	
-%.o: %.c
-		$(CC) -c -o $@ $< $(CFLAGS)
+$(OBJDIR):
+	$(MKDIR_P) $(OBJDIR)
+	
+$(OBJDIR)/%.o: %.c | $(OBJDIR)
+	$(CC) -c -MMD $(CFLAGS) $< -o $@
 
-hubicfuse: $(OBJECTS) $(HEADERS)
-	$(CC) $(CFLAGS) -o hubicfuse $(OBJECTS) $(LIBS) $(LDFLAGS)
+-include $(DEPS)
+
+hubicfuse: $(OBJS) | config.h
+	$(CC) -o $@ $^ $(LIBS) $(LDFLAGS)
 
 clean:
-	/bin/rm -f hubicfuse $(OBJECTS)
+	/bin/rm -rf hubicfuse $(OBJDIR) *.orig
 
 distclean: clean
-	/bin/rm -f Makefile config.h config.status config.cache config.log \
-		marklib.dvi
+	/bin/rm -rf Makefile config.h config.status config.cache config.log \
+		autoscan.log configure.scan aclocal.m4 autom4te.cache stamp-h* marklib.dvi
 
 mostlyclean: clean
 
@@ -45,8 +52,10 @@ maintainer-clean: clean
 debug: CFLAGS += -g
 debug: hubicfuse
 
+configure: configure.ac
+	autoconf
 config.h.in: stamp-h.in
-stamp-h.in: configure.in
+stamp-h.in: configure.ac
 	autoheader
 	echo timestamp > stamp-h.in
 
@@ -57,3 +66,19 @@ Makefile: Makefile.in config.status
 	./config.status
 config.status: configure
 	./config.status --recheck
+
+reformat:
+	astyle --style=allman \
+		--convert-tabs \
+		--indent=spaces=2 \
+		--lineend=linux \
+		--max-code-length=79 \
+		--pad-oper \
+		--pad-header \
+		--align-pointer=type \
+		--align-reference=name \
+		--break-closing-brackets \
+		--min-conditional-indent=0 \
+		--remove-brackets \
+		--remove-comment-prefix \
+		*.c *.h

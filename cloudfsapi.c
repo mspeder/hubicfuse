@@ -22,7 +22,7 @@
 #include <libxml/xpathInternals.h>
 #include "commonfs.h"
 #include "cloudfsapi.h"
-#include "config.h"
+#include "options.h"
 
 #define RHEL5_LIBCURL_VERSION 462597
 #define RHEL5_CERTIFICATE_FILE "/etc/pki/tls/certs/ca-bundle.crt"
@@ -37,15 +37,7 @@ static char storage_token[MAX_HEADER_SIZE];
 static pthread_mutex_t pool_mut;
 static CURL *curl_pool[1024];
 static int curl_pool_count = 0;
-extern int debug;
-extern int verify_ssl;
-extern bool option_get_extended_metadata;
-extern bool option_curl_verbose;
-extern int option_curl_progress_state;
-extern int option_cache_statfs_timeout;
-extern bool option_extensive_debug;
-extern bool option_enable_chown;
-extern bool option_enable_chmod;
+
 static int rhel5_mode = 0;
 static struct statvfs statcache = {
   .f_bsize = 4096,
@@ -375,12 +367,13 @@ static int send_request_size(const char *method, const char *path, void *fp,
     curl_easy_setopt(curl, CURLOPT_HEADER, 0);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1);
     //reversed logic, 0=to enable curl progress
-    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, option_curl_progress_state ? 0 : 1);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS,
+                     options->curl_progress_state ? 0 : 1);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, verify_ssl ? 1 : 0);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, verify_ssl);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, options->verify_ssl ? 1 : 0);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, options->verify_ssl);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10);
-    curl_easy_setopt(curl, CURLOPT_VERBOSE, option_curl_verbose ? 1 : 0);
+    curl_easy_setopt(curl, CURLOPT_VERBOSE, options->curl_verbose ? 1 : 0);
     add_header(&headers, "X-Auth-Token", storage_token);
     dir_entry *de;
     if (de_cached_entry == NULL)
@@ -935,11 +928,11 @@ int cloudfs_object_read_fp(const char *path, FILE *fp)
   }
   
   struct timespec now;
-  if (flen >= segment_above)
+  if (flen >= options->segment_above)
   {
     int i;
-    long remaining = flen % segment_size;
-    int full_segments = flen / segment_size;
+    long remaining = flen % options->segment_size;
+    int full_segments = flen / options->segment_size;
     int segments = full_segments + (remaining > 0);
 
     // The best we can do here is to get the current time that way tools that
@@ -960,13 +953,13 @@ int cloudfs_object_read_fp(const char *path, FILE *fp)
     // reusing manifest
     // TODO: check how addition of meta_mtime in manifest impacts utimens implementation
     snprintf(manifest, MAX_URL_SIZE, "%s_segments/%s/%s/%ld/%ld/",
-        container, object, meta_mtime, flen, segment_size);
+             container, object, meta_mtime, flen, options->segment_size);
     char tmp[MAX_URL_SIZE];
     strncpy(tmp, seg_base, MAX_URL_SIZE);
     snprintf(seg_base, MAX_URL_SIZE, "%s/%s", tmp, manifest);
 
     run_segment_threads("PUT", segments, full_segments, remaining, fp,
-            seg_base, segment_size);
+                        seg_base, options->segment_size);
 
     char *encoded = curl_escape(path, 0);
     curl_slist *headers = NULL;
@@ -1407,36 +1400,9 @@ off_t cloudfs_file_size(int fd)
   return buf.st_size;
 }
 
-void cloudfs_verify_ssl(int vrfy)
+struct htmlString
 {
-  verify_ssl = vrfy ? 2 : 0;
-}
-
-void cloudfs_option_get_extended_metadata(int option)
-{
-  option_get_extended_metadata  = option ? true : false;
-}
-
-void cloudfs_option_curl_verbose(int option)
-{
-  option_curl_verbose = option ? true : false;
-}
-
-static struct {
-  char client_id    [MAX_HEADER_SIZE];
-  char client_secret[MAX_HEADER_SIZE];
-  char refresh_token[MAX_HEADER_SIZE];
-} reconnect_args;
-
-void cloudfs_set_credentials(char *client_id, char *client_secret, char *refresh_token)
-{
-  strncpy(reconnect_args.client_id    , client_id    , sizeof(reconnect_args.client_id    ));
-  strncpy(reconnect_args.client_secret, client_secret, sizeof(reconnect_args.client_secret));
-  strncpy(reconnect_args.refresh_token, refresh_token, sizeof(reconnect_args.refresh_token));
-}
-
-struct htmlString {
-  char *text;
+  char* text;
   size_t size;
 };
 
@@ -1528,16 +1494,17 @@ int cloudfs_connect()
   struct json_object *json_obj;
 
   pthread_mutex_lock(&pool_mut);
-  debugf(DBG_LEVEL_NORM, "Authenticating... (client_id = '%s')", HUBIC_CLIENT_ID);
+  debugf(DBG_LEVEL_NORM, "Authenticating... (client_id = '%s')",
+         options->client_id);
   storage_token[0] = storage_url[0] = '\0';
   CURL *curl = curl_easy_init();
 
   /* curl default options */
-  curl_easy_setopt(curl, CURLOPT_VERBOSE, debug);
+  curl_easy_setopt(curl, CURLOPT_VERBOSE, debug_level ? 1 : 0);
   curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, verify_ssl ? 1 : 0);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, verify_ssl);
+  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, options->verify_ssl);
+  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, options->verify_ssl);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10);
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10);
   curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1);
@@ -1550,14 +1517,15 @@ int cloudfs_connect()
   /* Step 2 : get request code - Not needed anymore with refresh_token */
   /* Step 3 : get access token */
 
-  sprintf(payload, "refresh_token=%s&grant_type=refresh_token", HUBIC_REFRESH_TOKEN);
+  sprintf(payload, "refresh_token=%s&grant_type=refresh_token",
+          options->refresh_token);
   curl_easy_setopt(curl, CURLOPT_URL, HUBIC_TOKEN_URL);
   curl_easy_setopt(curl, CURLOPT_POST, 1L);
   curl_easy_setopt(curl, CURLOPT_HEADER, 0);
   curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload);
   curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, strlen(payload));
-  curl_easy_setopt(curl, CURLOPT_USERNAME, HUBIC_CLIENT_ID);
-  curl_easy_setopt(curl, CURLOPT_PASSWORD, HUBIC_CLIENT_SECRET);
+  curl_easy_setopt(curl, CURLOPT_USERNAME, options->client_id);
+  curl_easy_setopt(curl, CURLOPT_PASSWORD, options->client_secret);
   curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
 
   char *json_str = htmlStringGet(curl);

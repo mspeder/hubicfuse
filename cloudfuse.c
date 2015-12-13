@@ -15,20 +15,7 @@
 #include <openssl/md5.h>
 #include "commonfs.h"
 #include "cloudfsapi.h"
-#include "config.h"
-
-extern char *temp_dir;
-extern pthread_mutex_t dcachemut;
-extern pthread_mutexattr_t mutex_attr;
-extern int debug;
-extern int cache_timeout;
-extern int option_cache_statfs_timeout;
-extern int option_debug_level;
-extern bool option_get_extended_metadata;
-extern bool option_curl_progress_state;
-extern bool option_enable_chown;
-extern bool option_enable_chmod;
-extern size_t file_buffer_size;
+#include "options.h"
 
 typedef struct
 {
@@ -61,10 +48,10 @@ static int cfs_getattr(const char *path, struct stat *stbuf)
   }
   
   //lazzy download of file metadata, only when really needed
-  if (option_get_extended_metadata && !de->metadata_downloaded) {
+  if (options->get_extended_metadata && !de->metadata_downloaded)
     get_file_metadata(de);
-  }
-  if (option_enable_chown) {
+  if (options->enable_chown)
+  {
     stbuf->st_uid = de->uid;
     stbuf->st_gid = de->gid;
   }
@@ -89,7 +76,8 @@ static int cfs_getattr(const char *path, struct stat *stbuf)
 
   int default_mode_dir, default_mode_file;
 
-  if (option_enable_chmod) {
+  if (options->enable_chmod)
+  {
     default_mode_dir = de->chmod;
     default_mode_file = de->chmod;
   }
@@ -136,7 +124,7 @@ static int cfs_fgetattr(const char *path, struct stat *stbuf, struct fuse_file_i
       return -ENOENT;
     }
     int default_mode_file;
-    if (option_enable_chmod) {
+    if (options->enable_chmod)
       default_mode_file = de->chmod;
     }
     else {
@@ -192,8 +180,9 @@ static int cfs_create(const char *path, mode_t mode, struct fuse_file_info *info
   int errsv;
   char file_path_safe[NAME_MAX] = "";
 
-  if (*temp_dir) {  
-    get_safe_cache_file_path(path, file_path_safe, temp_dir);
+  if (options->temp_dir)
+  {
+    get_safe_cache_file_path(path, file_path_safe, options->temp_dir);
     temp_file = fopen(file_path_safe, "w+b");
     errsv = errno;
     if (temp_file == NULL){
@@ -258,9 +247,10 @@ static int cfs_open(const char *path, struct fuse_file_info *info)
   int errsv;
   dir_entry *de = path_info(path);
 
-  if (*temp_dir) {
+  if (options->temp_dir)
+  {
     char file_path_safe[NAME_MAX];
-    get_safe_cache_file_path(path, file_path_safe, temp_dir);
+    get_safe_cache_file_path(path, file_path_safe, options->temp_dir);
 
     debugf(DBG_LEVEL_EXT, "cfs_open: try open (%s)", file_path_safe);
     if (access(file_path_safe, F_OK) != -1){
@@ -677,56 +667,6 @@ int cfs_listxattr(const char *path, char *list, size_t size)
   return 0;
 }
 
-FuseOptions options = {
-  .cache_timeout = "600",
-  .verify_ssl = "true",
-  .segment_size = "1073741824",
-  .segment_above = "2147483647",
-  .storage_url = "",
-  .container = "",
-  //.temp_dir = "/tmp/",
-  .temp_dir = "",
-  .client_id = "",
-  .client_secret = "",
-  .refresh_token = ""
-};
-
-ExtraFuseOptions extra_options = {
-  .get_extended_metadata = "false",
-  .curl_verbose = "false",
-  .cache_statfs_timeout = 0,
-  .debug_level = 0,
-  .curl_progress_state = "false",
-  .enable_chown = "false",
-  .enable_chmod = "false"
-};
-
-int parse_option(void *data, const char *arg, int key, struct fuse_args *outargs)
-{
-  if (sscanf(arg, " cache_timeout = %[^\r\n ]", options.cache_timeout) ||
-    sscanf(arg, " verify_ssl = %[^\r\n ]", options.verify_ssl) ||
-    sscanf(arg, " segment_above = %[^\r\n ]", options.segment_above) ||
-    sscanf(arg, " segment_size = %[^\r\n ]", options.segment_size) ||
-    sscanf(arg, " storage_url = %[^\r\n ]", options.storage_url) ||
-    sscanf(arg, " container = %[^\r\n ]", options.container) ||
-    sscanf(arg, " temp_dir = %[^\r\n ]", options.temp_dir) ||
-    sscanf(arg, " client_id = %[^\r\n ]", options.client_id) ||
-    sscanf(arg, " client_secret = %[^\r\n ]", options.client_secret) ||
-    sscanf(arg, " refresh_token = %[^\r\n ]", options.refresh_token) ||
-
-    sscanf(arg, " get_extended_metadata = %[^\r\n ]", extra_options.get_extended_metadata) ||
-    sscanf(arg, " curl_verbose = %[^\r\n ]", extra_options.curl_verbose) ||
-    sscanf(arg, " cache_statfs_timeout = %[^\r\n ]", extra_options.cache_statfs_timeout) ||
-    sscanf(arg, " debug_level = %[^\r\n ]", extra_options.debug_level) ||
-    sscanf(arg, " curl_progress_state = %[^\r\n ]", extra_options.curl_progress_state) ||
-    sscanf(arg, " enable_chmod = %[^\r\n ]", extra_options.enable_chmod) ||
-    sscanf(arg, " enable_chown = %[^\r\n ]", extra_options.enable_chown)
-    )
-    return 0;
-  if (!strcmp(arg, "-f") || !strcmp(arg, "-d") || !strcmp(arg, "debug"))
-    cloudfs_debug(1);
-  return 1;
-}
 
 //allows memory leaks inspections
 void interrupt_handler(int sig) {
@@ -739,38 +679,27 @@ void interrupt_handler(int sig) {
   exit(0);
 }
 
-void initialise_options()
+int cfs_listxattr(const char* path, char* list, size_t size)
 {
-  //todo: handle param init consistently, quite heavy implementation
-  cloudfs_verify_ssl(!strcasecmp(options.verify_ssl, "true"));
-  cloudfs_option_get_extended_metadata(!strcasecmp(extra_options.get_extended_metadata, "true"));
-  cloudfs_option_curl_verbose(!strcasecmp(extra_options.curl_verbose, "true"));
-  //lean way to init params, to be used as reference
-  if (*extra_options.debug_level)
   {
-    option_debug_level = atoi(extra_options.debug_level);
   }
-  if (*extra_options.cache_statfs_timeout)
   {
-    option_cache_statfs_timeout = atoi(extra_options.cache_statfs_timeout);
   }
-  if (*extra_options.curl_progress_state)
   {
-    option_curl_progress_state = !strcasecmp(extra_options.curl_progress_state, "true");
+  };
+  {
   }
-  if (*extra_options.enable_chmod)
   {
-    option_enable_chmod = !strcasecmp(extra_options.enable_chmod, "true");
-  }
-  if (*extra_options.enable_chown)
-  {
-    option_enable_chown = !strcasecmp(extra_options.enable_chown, "true");
   }
 }
 
 int main(int argc, char **argv)
 {
+
+  options = options_new();
+
   fprintf(stderr, "Starting hubicfuse on homedir %s!\n", get_home_dir());
+  fprintf(stderr, "options %p\n", options);
   signal(SIGINT, interrupt_handler);
 
   char settings_filename[MAX_PATH_SIZE] = "";
@@ -786,51 +715,19 @@ int main(int argc, char **argv)
     fclose(settings);
   }
 
-  fuse_opt_parse(&args, &options, NULL, parse_option);
-  cache_timeout = atoi(options.cache_timeout);
-  segment_size = atoll(options.segment_size);
-  segment_above = atoll(options.segment_above);
-  // this is ok since main is on the stack during the entire execution
-  override_storage_url = options.storage_url;
-  public_container = options.container;
-  temp_dir = options.temp_dir;
+  fuse_opt_parse(&args, options, NULL, (fuse_opt_proc_t)parse_option);
 
-  if (!*options.client_id || !*options.client_secret || !*options.refresh_token)
+  if (!options->client_id || !options->client_secret || !options->refresh_token)
   {
-    fprintf(stderr, "Unable to determine client_id, client_secret or refresh_token.\n\n");
-    fprintf(stderr, "These can be set either as mount options or in "
-                    "a file named %s\n\n", settings_filename);
-    fprintf(stderr, "  client_id=[App's id]\n");
-    fprintf(stderr, "  client_secret=[App's secret]\n");
-    fprintf(stderr, "  refresh_token=[Get it running hubic_token]\n");
-    fprintf(stderr, "The following settings are optional:\n\n");
-    fprintf(stderr, "  cache_timeout=[Seconds for directory caching, default 600]\n");
-    fprintf(stderr, "  verify_ssl=[false to disable SSL cert verification]\n");
-    fprintf(stderr, "  segment_size=[Size to use when creating DLOs, default 1073741824]\n");
-    fprintf(stderr, "  segment_above=[File size at which to use segments, defult 2147483648]\n");
-    fprintf(stderr, "  storage_url=[Storage URL for other tenant to view container]\n");
-    fprintf(stderr, "  container=[Public container to view of tenant specified by storage_url]\n");
-    fprintf(stderr, "  temp_dir=[Directory to store temp files]\n");
-    fprintf(stderr, "  get_extended_metadata=[true to enable download of utime, chmod, chown file attributes (but slower)]\n");
-    fprintf(stderr, "  curl_verbose=[true to debug info on curl requests (lots of output)]\n");
-    fprintf(stderr, "  curl_progress_state=[true to enable progress callback enabled. Mostly used for debugging]\n");
-    fprintf(stderr, "  cache_statfs_timeout=[number of seconds to cache requests to statfs (cloud statistics), 0 for no cache]\n");
-    fprintf(stderr, "  debug_level=[0 to 2, 0 for minimal verbose debugging. No debug if -d or -f option is not provided.]\n");
-    fprintf(stderr, "  enable_chmod=[true to enable chmod support on fuse]\n");
-    fprintf(stderr, "  enable_chown=[true to enable chown support on fuse]\n");
+    print_usage(settings_filename);
     return 1;
   }
   cloudfs_init();
-  initialise_options();
-  if (debug)
-  {
-    fprintf(stderr, "debug_level = %d\n", option_debug_level);
-    fprintf(stderr, "get_extended_metadata = %d\n", option_get_extended_metadata);
-    fprintf(stderr, "curl_progress_state = %d\n", option_curl_progress_state);
-    fprintf(stderr, "enable_chmod = %d\n", option_enable_chmod);
-    fprintf(stderr, "enable_chown = %d\n", option_enable_chown);
-  }
-  cloudfs_set_credentials(options.client_id, options.client_secret, options.refresh_token);
+  //initialise_options();
+  /*
+    cloudfs_set_credentials(options.client_id, options.client_secret,
+                          options.refresh_token);
+  */
 
   if (!cloudfs_connect())
   {
@@ -878,5 +775,11 @@ int main(int argc, char **argv)
   pthread_mutexattr_init(&mutex_attr);
   pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
   pthread_mutex_init(&dcachemut, &mutex_attr);
-  return fuse_main(args.argc, args.argv, &cfs_oper, &options);
+
+  int result = fuse_main(args.argc, args.argv, &cfs_oper, options);
+
+  fprintf(stderr, "Stopping hubicfuse");
+  options_delete(options);
+
+  return result;
 }

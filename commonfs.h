@@ -2,16 +2,10 @@
 #define _COMMONFS_H
 #define FUSE_USE_VERSION 26
 #include <fuse.h>
+#include "utils.h"
 
-typedef enum { false, true } bool;
 #define MAX_PATH_SIZE (1024 + 256 + 3)
 #define THREAD_NAMELEN 16
-// 64 bit time + nanoseconds
-#define TIME_CHARS 32
-#define DBG_LEVEL_NORM 0
-#define DBG_LEVEL_EXT 1
-#define DBG_LEVEL_EXTALL 2
-#define INT_CHAR_LEN 16
 
 // utimens support
 #define HEADER_TEXT_MTIME "X-Object-Meta-Mtime"
@@ -27,20 +21,7 @@ typedef enum { false, true } bool;
 #define TEMP_FILE_NAME_FORMAT "%s/.cloudfuse_%s"
 #define HUBIC_DATE_FORMAT "%Y-%m-%d %T."
 
-#define KNRM  "\x1B[0m"
-#define KRED  "\x1B[31m"
-#define KGRN  "\x1B[32m"
-#define KYEL  "\x1B[33m"
-#define KBLU  "\x1B[34m"
-#define KMAG  "\x1B[35m"
-#define KCYN  "\x1B[36m"
-#define KWHT  "\x1B[37m"
 
-#define min(x, y) ({                \
-  typeof(x) _min1 = (x);          \
-  typeof(y) _min2 = (y);          \
-  (void)(&_min1 == &_min2);      \
-  _min1 < _min2 ? _min1 : _min2; })
 
 //linked list with files in a directory
 typedef struct dir_entry
@@ -103,8 +84,5 @@ void dir_decache(const char *path);
 void cloudfs_free_dir_list(dir_entry *dir_list);
 extern int cloudfs_list_directory(const char *path, dir_entry **);
 int caching_list_directory(const char *path, dir_entry **list);
-char *get_home_dir();
-void cloudfs_debug(int dbg);
-void debugf(int level, char *fmt, ...);
 
 #endif

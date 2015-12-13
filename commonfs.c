@@ -9,36 +9,18 @@
 #ifdef __linux__
 #include <alloca.h>
 #endif
-#include <pthread.h>
 #include <time.h>
-#include <unistd.h>
-#include <sys/types.h>
 #include <sys/time.h>
-#include <sys/syscall.h>
 #include <openssl/md5.h>
-#include <pwd.h>
 #include <limits.h>
 #include <curl/curl.h>
 #include <curl/easy.h>
 #include "commonfs.h"
-#include "config.h"
+#include "options.h"
 
 pthread_mutex_t dcachemut;
 pthread_mutexattr_t mutex_attr;
-dir_cache *dcache;
-char *temp_dir;
-int cache_timeout;
-int debug = 0;
-int verify_ssl = 2;
-bool option_get_extended_metadata = false;
-bool option_curl_verbose = false;
-int option_cache_statfs_timeout = 0;
-int option_debug_level = 0;
-int option_curl_progress_state = 1;//1 to disable curl progress
-bool option_enable_chown = false;
-bool option_enable_chmod = false;
-bool option_enable_progressive_upload = false;
-bool option_enable_progressive_download = false;
+dir_cache* dcache;
 size_t file_buffer_size = 0;
 
 // needed to get correct GMT / local time
@@ -492,7 +474,8 @@ int caching_list_directory(const char *path, dir_entry **list)
     cw = new_cache(path);
     new_entry = true;
   }
-  else if (cache_timeout > 0 && (time(NULL) - cw->cached > cache_timeout))
+  else if (options->cache_timeout > 0
+           && (time(NULL) - cw->cached > options->cache_timeout))
   {
     if (!cloudfs_list_directory(path, list))
     {
@@ -618,50 +601,4 @@ dir_entry *check_path_info(const char *path)
     debugf(DBG_LEVEL_EXT, "exit 3: check_path_info(%s) "KYEL"[CACHE-MISS]", path);
   }
   return NULL;
-}
-
-
-char *get_home_dir()
-{
-  char *home;
-  if ((home = getenv("HOME")) && !access(home, R_OK))
-    return home;
-  struct passwd *pwd = getpwuid(geteuid());
-  if ((home = pwd->pw_dir) && !access(home, R_OK))
-    return home;
-  return "~";
-}
-
-void cloudfs_debug(int dbg)
-{
-  debug = dbg;
-}
-
-void debugf(int level, char *fmt, ...)
-{
-  if (debug) 
-  {
-    if (level <= option_debug_level)
-    {
-#ifdef SYS_gettid
-      pid_t thread_id = syscall(SYS_gettid);
-  #else
-      int thread_id = 0;
-#error "SYS_gettid unavailable on this system"
-#endif
-      va_list args;
-      char prefix[] = "==DBG %d [%s]:%d==";
-      char line[4096];
-      char time_str[TIME_CHARS];
-      get_time_now_as_str(time_str, sizeof(time_str));
-      sprintf(line, prefix, level, time_str, thread_id);
-      fputs(line, stderr);
-      va_start(args, fmt);
-      vfprintf(stderr, fmt, args);
-      va_end(args);
-      fputs(KNRM, stderr);
-      putc('\n', stderr);
-      putc('\r', stderr);
-    }
-  }
 }

@@ -3,6 +3,7 @@
 #define FUSE_USE_VERSION 26
 #include <fuse.h>
 #include "utils.h"
+#include "map.h"
 
 #define MAX_PATH_SIZE (1024 + 256 + 3)
 #define THREAD_NAMELEN 16

@@ -16,6 +16,7 @@
 #include <curl/curl.h>
 #include <curl/easy.h>
 #include "commonfs.h"
+#include "base64.h"
 #include "options.h"
 
 pthread_mutex_t dcachemut;

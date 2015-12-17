@@ -17,25 +17,29 @@
 typedef struct curl_slist curl_slist;
 
 #define MINIMAL_PROGRESS_FUNCTIONALITY_INTERVAL 5
-struct curl_progress {
+struct curl_progress
+{
   double lastruntime;
-  CURL *curl;
+  CURL* curl;
 };
 
 
 void cloudfs_init(void);
 void cloudfs_free(void);
-void cloudfs_set_credentials(char *client_id, char *client_secret, char *refresh_token);
-int cloudfs_connect(void);
+/*
+  void cloudfs_set_credentials(char* client_id, char* client_secret,
+                             char* refresh_token);
+*/
+int cloudfs_connect();
 
 struct segment_info
 {
-  FILE *fp;
+  FILE* fp;
   int part;
   long size;
   long segment_size;
-  char *seg_base;
-  const char *method;
+  char* seg_base;
+  const char* method;
 };
 
 int file_is_readable(const char* fname);
@@ -49,7 +53,7 @@ int cloudfs_create_symlink(const char* src, const char* dst);
 int cloudfs_create_directory(const char* label);
 int cloudfs_object_truncate(const char* path, off_t size);
 off_t cloudfs_file_size(int fd);
-int cloudfs_statfs(const char *path, struct statvfs *stat);
+int cloudfs_statfs(const char* path, struct statvfs* stat);
 void cloudfs_verify_ssl(int dbg);
 void get_file_metadata(dir_entry* de);
 int cloudfs_update_meta(dir_entry* de);

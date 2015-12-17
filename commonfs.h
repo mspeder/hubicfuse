@@ -38,16 +38,19 @@ typedef struct metadataItem
 //linked list with files in a directory
 typedef struct dir_entry
 {
-  char *name;
-  char *full_name;
-  char *content_type;
+  char* name;
+  char* full_name;
+  char* content_type;
   off_t size;
   time_t last_modified;
-  // implement utimens
+  int isdir;
+  int islink;
+  struct dir_entry* next;
+  // metadatas
   struct timespec mtime;
   struct timespec ctime;
   struct timespec atime;
-  char *md5sum; //interesting capability for rsync/scrub
+  char* md5sum; //interesting capability for rsync/scrub
   mode_t chmod;
   uid_t uid;
   gid_t gid;
@@ -57,23 +60,19 @@ typedef struct dir_entry
   bool issegmented;
   time_t accessed_in_cache;//todo: cache support based on access time
   bool metadata_downloaded;
-  // end change
-  int isdir;
-  int islink;
-  struct dir_entry *next;
 } dir_entry;
 
 // linked list with cached folder names
 typedef struct dir_cache
 {
-  char *path;
-  dir_entry *entries;
+  char* path;
+  dir_entry* entries;
   time_t cached;
   //added cache support based on access time
   time_t accessed_in_cache;
   bool was_deleted;
   //end change
-  struct dir_cache *next, *prev;
+  struct dir_cache* next, *prev;
 } dir_cache;
 
 metadataItem* metadata_new();
@@ -93,23 +92,25 @@ time_t get_time_as_local(time_t time_t_val, char time_str[],
 int get_time_as_string(time_t time_t_val, long nsec, char* time_str,
                        int time_str_len);
 time_t get_time_now();
-int get_timespec_as_str(const struct timespec *times, char *time_str, int time_str_len);
-char *str2md5(const char *str, int length);
-int file_md5(FILE *file_handle, char *md5_file_str);
-void debug_print_descriptor(struct fuse_file_info *info);
-int get_safe_cache_file_path(const char *file_path, char *file_path_safe, char *temp_dir);
-dir_entry *init_dir_entry();
-void copy_dir_entry(dir_entry *src, dir_entry *dst);
-dir_cache *new_cache(const char *path);
-void dir_for(const char *path, char *dir);
+int get_timespec_as_str(const struct timespec* times, char* time_str,
+                        int time_str_len);
+char* str2md5(const char* str, int length);
+int file_md5(FILE* file_handle, char* md5_file_str);
+void debug_print_descriptor(struct fuse_file_info* info);
+int get_safe_cache_file_path(const char* file_path, char* file_path_safe,
+                             char* temp_dir);
+dir_entry* init_dir_entry();
+void copy_dir_entry(dir_entry* src, dir_entry* dst);
+dir_cache* new_cache(const char* path);
+void dir_for(const char* path, char* dir);
 void debug_list_cache_content();
-void update_dir_cache(const char *path, off_t size, int isdir, int islink);
-dir_entry *path_info(const char *path);
-dir_entry *check_path_info(const char *path);
-dir_entry * check_parent_folder_for_file(const char *path);
-void dir_decache(const char *path);
-void cloudfs_free_dir_list(dir_entry *dir_list);
-extern int cloudfs_list_directory(const char *path, dir_entry **);
-int caching_list_directory(const char *path, dir_entry **list);
+void update_dir_cache(const char* path, off_t size, int isdir, int islink);
+dir_entry* path_info(const char* path);
+dir_entry* check_path_info(const char* path);
+dir_entry* check_parent_folder_for_file(const char* path);
+void dir_decache(const char* path);
+void cloudfs_free_dir_list(dir_entry* dir_list);
+extern int cloudfs_list_directory(const char* path, dir_entry**);
+int caching_list_directory(const char* path, dir_entry** list);
 
 #endif

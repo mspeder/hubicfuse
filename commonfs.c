@@ -24,6 +24,127 @@ pthread_mutexattr_t mutex_attr;
 dir_cache* dcache;
 size_t file_buffer_size = 0;
 
+metadataItem* metadata_new()
+{
+  debugf(DBG_LEVEL_EXT, "metadata_new");
+  metadataItem* item = malloc(sizeof(metadataItem));
+  item->value = NULL;
+  item->size = 0;
+  item->encoded = NULL;
+  item->esize = 0;
+  return item;
+}
+
+metadataItem* metadata_new_xattr(const char* key, const char* value,
+                                 size_t size)
+{
+  debugf(DBG_LEVEL_EXT, "metadata_new_xattr");
+  if (key == NULL || value == NULL) return NULL;
+  int l = strlen(key) + 1;
+  char* decoded = malloc(l + size);
+  memcpy(decoded, key, l);
+  memcpy(decoded + l, value, size);
+  char* encoded = base64_encode(decoded, l + size);
+  free(decoded);
+  if (encoded == NULL) return NULL;
+  metadataItem* item = malloc(sizeof(metadataItem));
+  item->size = size;
+  item->value = malloc(size);
+  memcpy(item->value, value, size);
+  item->encoded = encoded;
+  item->esize = strlen(encoded);
+  return item;
+}
+
+
+metadataItem* metadata_new_encoded(const char* value)
+{
+  debugf(DBG_LEVEL_EXT, "metadata_new_encoded");
+  if (value == NULL) return NULL;
+  metadataItem* item = malloc(sizeof(metadataItem));
+  item->value = NULL;
+  item->size = 0;
+  item->encoded = strdup(value);
+  item->esize = strlen(value);
+  return item;
+}
+
+metadataItem* metadata_new_xattr_encoded(const char* value, char** key)
+{
+  debugf(DBG_LEVEL_EXT, "metadata_new_xattr_encoded");
+  if (value == NULL) return NULL;
+  int el;
+  char* decoded = base64_decode(value, &el);
+  if (decoded == NULL) return NULL;
+  metadataItem* item = malloc(sizeof(metadataItem));
+  item->esize = strlen(value);
+  int vl = item->esize + 1;
+  item->encoded = malloc(vl);
+  memcpy(item->encoded, value, vl);
+  int keylen = strlen(decoded) + 1;
+  int vlen = el - keylen;
+  *key = malloc(keylen);
+  memcpy(*key, decoded, keylen);
+  item->size = vlen;
+  item->value = malloc(vlen);
+  memcpy(item->value, decoded + keylen, vlen);
+  free(decoded);
+  return item;
+}
+
+void metadata_copy(const char* key, void* item, void* param)
+{
+  debugf(DBG_LEVEL_EXT, "metadata_copy");
+  stringMap* destmap = (stringMap*)param;
+  metadataItem* it = (metadataItem*)item;
+  metadataItem* cpy = malloc(sizeof(metadataItem));
+  cpy->size = it->size;
+  cpy->esize = it->esize;
+  if (it->encoded != NULL)
+    cpy->encoded = strdup(it->encoded);
+  else
+    cpy->encoded = NULL;
+  if (it->value != NULL)
+  {
+    cpy->value = malloc(it->size);
+    memcpy(cpy->value, it->value, it->size);
+  }
+  else
+    cpy->value = NULL;
+  stringMap_put(destmap, key, cpy);
+}
+
+void metadata_delete(void* item)
+{
+  metadataItem* it = (metadataItem*)item;
+  free(it->value);
+  free(it->encoded);
+}
+
+bool is_unknown_meta(const char* head)
+{
+  //Is this a meta ?
+  if (strncasecmp(head, HEADER_TEXT_META,
+                  strlen(HEADER_TEXT_META))) return false;
+  //Check if name is starting by one of our known metas
+  if (!strncasecmp(head, HEADER_TEXT_ATIME,
+                   strlen(HEADER_TEXT_ATIME))) return false;
+  if (!strncasecmp(head, HEADER_TEXT_CTIME,
+                   strlen(HEADER_TEXT_CTIME))) return false;
+  if (!strncasecmp(head, HEADER_TEXT_MTIME,
+                   strlen(HEADER_TEXT_MTIME))) return false;
+  if (!strncasecmp(head, HEADER_TEXT_FILEPATH,
+                   strlen(HEADER_TEXT_FILEPATH))) return false;
+  if (!strncasecmp(head, HEADER_TEXT_CHMOD,
+                   strlen(HEADER_TEXT_CHMOD))) return false;
+  if (!strncasecmp(head, HEADER_TEXT_GID, strlen(HEADER_TEXT_GID))) return false;
+  if (!strncasecmp(head, HEADER_TEXT_UID, strlen(HEADER_TEXT_UID))) return false;
+  if (!strncasecmp(head, HEADER_TEXT_META_XATTR,
+                   strlen(HEADER_TEXT_META_XATTR))) return false;
+  //We don't know it
+  return true;
+}
+
 // needed to get correct GMT / local time
 // hubic stores time as GMT so we have to do conversions
 // http://zhu-qy.blogspot.ro/2012/11/ref-how-to-convert-from-utc-to-local.html
@@ -286,6 +407,9 @@ void cloudfs_free_dir_list(dir_entry *dir_list)
     free(de->content_type);
     //TODO free all added fields
     free(de->md5sum);
+    stringMap_delete(de->xattrs);
+    stringMap_delete(de->raw_xattrs);
+    if (de->unknown_metas) stringMap_delete(de->unknown_metas);
     free(de);
   }
 }
@@ -360,6 +484,10 @@ dir_entry* init_dir_entry()
   de->chmod = 0;
   de->gid = 0;
   de->uid = 0;
+  de->xattrs = stringMap_new(metadata_delete);
+  de->raw_xattrs = stringMap_new(metadata_delete);
+  de->unknown_metas = options->preserve_metadatas ? stringMap_new(
+                        metadata_delete) : NULL;
   return de;
 }
 
@@ -373,6 +501,14 @@ void copy_dir_entry(dir_entry *src, dir_entry *dst)
   dst->ctime.tv_nsec = src->ctime.tv_nsec;
   dst->chmod = src->chmod;
   //todo: copy md5sum as well
+  stringMap_clear(dst->xattrs);
+  stringMap_iterate(src->xattrs, metadata_copy, dst->xattrs);
+  stringMap_clear(dst->raw_xattrs);
+  if (src->unknown_metas && dst->unknown_metas)
+  {
+    stringMap_clear(dst->unknown_metas);
+    stringMap_iterate(src->unknown_metas, metadata_copy, dst->unknown_metas);
+  }
 }
 	
 //check for file in cache, if found size will be updated, if not found 

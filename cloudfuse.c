@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <attr/xattr.h>
 #include <pthread.h>
 #include <pwd.h>
 #include <fcntl.h>
@@ -23,10 +24,9 @@ typedef struct
   int flags;
 } openfile;
 
-static int cfs_getattr(const char *path, struct stat *stbuf)
+static int cfs_getattr(const char* path, struct stat* stbuf)
 {
   debugf(DBG_LEVEL_NORM, KBLU "cfs_getattr(%s)", path);
-  
 
   //return standard values for root folder
   if (!strcmp(path, "/"))
@@ -40,13 +40,15 @@ static int cfs_getattr(const char *path, struct stat *stbuf)
     return 0;
   }
   //get file. if not in cache will be downloaded.
-  dir_entry *de = path_info(path);
-  if (!de) {
+  dir_entry* de = path_info(path);
+  if (!de)
+  {
     debug_list_cache_content();
-    debugf(DBG_LEVEL_NORM, KBLU"exit 1: cfs_getattr(%s) "KYEL"not-in-cache/cloud", path);
+    debugf(DBG_LEVEL_NORM, KBLU"exit 1: cfs_getattr(%s) "KYEL"not-in-cache/cloud",
+           path);
     return -ENOENT;
   }
-  
+
   //lazzy download of file metadata, only when really needed
   if (options->get_extended_metadata && !de->metadata_downloaded)
     get_file_metadata(de);
@@ -647,26 +649,146 @@ static int cfs_utimens(const char *path, const struct timespec times[2])
 }
 
 
-int cfs_setxattr(const char *path, const char *name, const char *value, size_t size, int flags)
+int cfs_setxattr(const char* path, const char* name, const char* value,
+                 size_t size, int flags)
 {
+  debugf(DBG_LEVEL_NORM, KBLU"cfs_setxattr(%s):%s", path, name);
+  if (!options->get_extended_metadata) return -ENOTSUP;
+  dir_entry* path_de = path_info(path);
+  if (!path_de)
+  {
+    debugf(DBG_LEVEL_NORM, KBLU"exit 0: cfs_setxattr(%s) file not in cache", path);
+    return -ENOENT;
+  }
+  metadataItem* item = stringMap_get(path_de->xattrs, name);
+  if (flags == XATTR_CREATE && item != NULL) {
+  debugf(DBG_LEVEL_NORM, KBLU "exit 1: cfs_setxattr(%s) already existing", path);
+     return -EEXIST;
+  }
+  if (flags == XATTR_REPLACE && item == NULL) {
+  debugf(DBG_LEVEL_NORM, KBLU "exit 2: cfs_setxattr(%s) replace not existing", path);
+     return -ENOATTR;
+  }
+  stringMap_put(path_de->xattrs, name, metadata_new_xattr(name, value, size));
+  int response = cloudfs_update_meta(path_de);
+  debugf(DBG_LEVEL_NORM, KBLU "exit 3: cfs_setxattr(%s)", path);
   return 0;
 }
 
-int cfs_getxattr(const char *path, const char *name, char *value, size_t size)
+int cfs_getxattr(const char* path, const char* name, char* value, size_t size)
 {
+  debugf(DBG_LEVEL_NORM, KBLU"cfs_getxattr(%s):%s", path, name);
+  if (!options->get_extended_metadata) {
+    debugf(DBG_LEVEL_NORM, KBLU"exit 0: cfs_getxattr(%s) not supported", path);
+     return -ENOTSUP;
+  }
+  dir_entry* path_de = path_info(path);
+  if (!path_de)
+  {
+    debugf(DBG_LEVEL_NORM, KBLU"exit 1: cfs_getxattr(%s) file not in cache", path);
+    return -ENOENT;
+  }
+  metadataItem* item = stringMap_get(path_de->xattrs, name);
+  if (item == NULL) {
+  debugf(DBG_LEVEL_NORM, KBLU "exit 2: cfs_getxattr(%s) not existing", path);
+     return -ENOATTR;
+  }
+  if (size == 0) {
+  debugf(DBG_LEVEL_NORM, KBLU "exit 3: cfs_getxattr(%s) return size %d", path, item->size);
+     return item->size;
+  }
+  if (item->size >= size) {
+  debugf(DBG_LEVEL_NORM, KBLU "exit 4: cfs_setxattr(%s) not enough space", path);
+     return -ERANGE;
+  }
+  memcpy(value, item->value, item->size);
+  debugf(DBG_LEVEL_NORM, KBLU "exit 5: cfs_setxattr(%s)", path);
+  return item->size;
+}
+
+int cfs_removexattr(const char* path, const char* name)
+{
+  debugf(DBG_LEVEL_NORM, KBLU"cfs_removexattr(%s):%s", path, name);
+  if (!options->get_extended_metadata) {
+    debugf(DBG_LEVEL_NORM, KBLU"exit 0: cfs_removexattr(%s) not supported",
+           path);
+     return -ENOTSUP;
+  }
+  dir_entry* path_de = path_info(path);
+  if (!path_de)
+  {
+    debugf(DBG_LEVEL_NORM, KBLU"exit 1: cfs_removexattr(%s) file not in cache",
+           path);
+    return -ENOENT;
+  }
+  if (stringMap_erase(path_de->xattrs, name)) {
+  debugf(DBG_LEVEL_NORM, KBLU "exit 2: cfs_removexattr(%s) not existing", path);
+     return -ENOATTR;
+  }
+  int response = cloudfs_update_meta(path_de);
+    debugf(DBG_LEVEL_NORM, KBLU"exit 3: cfs_removexattr(%s)",
+           path);
   return 0;
 }
 
-int cfs_removexattr(const char *path, const char *name)
+typedef struct metadata_xattr_list_param
 {
-  return 0;
+  char* pos;
+  int rem;
+  int count;
+} metadata_xattr_list_param;
+
+void metadata_xattr_list(const char* key, void* it, void* p)
+{
+  metadataItem* item = (metadataItem*) it;
+  metadata_xattr_list_param* param = (metadata_xattr_list_param*) p;
+param->count++;
+  int s = strlen(key) + 1;
+  param->rem -= s;
+  if (param->rem < 0) {
+     //Not enough space
+     return;
+ }
+ memcpy(param->pos,key,s);
+ param->pos += s;
 }
 
-int cfs_listxattr(const char *path, char *list, size_t size)
+int cfs_listxattr(const char* path, char* list, size_t size)
 {
-  return 0;
+  debugf(DBG_LEVEL_NORM, KBLU"cfs_listxattr(%s) %d", path, size);
+  if (!options->get_extended_metadata) {
+     debugf(DBG_LEVEL_NORM, KBLU"exit 0: cfs_listxattr(%s) not supported",
+         path);
+     return -ENOTSUP;
+  }
+  dir_entry* path_de = path_info(path);
+  if (!path_de)
+  {
+    debugf(DBG_LEVEL_NORM, KBLU"exit 1: cfs_listxattr(%s) file not in cache", path);
+    return -ENOENT;
+  }
+  metadata_xattr_list_param p = {
+     .pos = list,
+     .rem = size,
+     .count = 0
+ };
+  
+  stringMap_iterate(path_de->xattrs, metadata_xattr_list, &p);
+  if (!size) {
+     debugf(DBG_LEVEL_NORM, KBLU"exit 2: cfs_listxattr(%s) return size %d",
+            path,-p.rem);
+     return -p.rem;
+  }
+  if (p.rem<0) {
+       debugf(DBG_LEVEL_NORM, KBLU"exit 3: cfs_listxattr(%s) not enough space",
+               path);
+               return -ERANGE;
+            }
+  
+     debugf(DBG_LEVEL_NORM, KBLU"exit 4: cfs_listxattr(%s) size %d",
+            path,size-p.rem);
+  return size-p.rem;
 }
-
 
 //allows memory leaks inspections
 void interrupt_handler(int sig) {
@@ -677,20 +799,6 @@ void interrupt_handler(int sig) {
   //TODO: clear dir cache
   pthread_mutex_destroy(&dcachemut);
   exit(0);
-}
-
-int cfs_listxattr(const char* path, char* list, size_t size)
-{
-  {
-  }
-  {
-  }
-  {
-  };
-  {
-  }
-  {
-  }
 }
 
 int main(int argc, char **argv)

@@ -8,21 +8,32 @@
 #define MAX_PATH_SIZE (1024 + 256 + 3)
 #define THREAD_NAMELEN 16
 
-// utimens support
-#define HEADER_TEXT_MTIME "X-Object-Meta-Mtime"
-#define HEADER_TEXT_ATIME "X-Object-Meta-Atime"
-#define HEADER_TEXT_CTIME "X-Object-Meta-Ctime"
-#define HEADER_TEXT_MTIME_DISPLAY "X-Object-Meta-Mtime-Display"
-#define HEADER_TEXT_ATIME_DISPLAY "X-Object-Meta-Atime-Display"
-#define HEADER_TEXT_CTIME_DISPLAY "X-Object-Meta-Ctime-Display"
-#define HEADER_TEXT_CHMOD "X-Object-Meta-Chmod"
-#define HEADER_TEXT_UID "X-Object-Meta-Uid"
-#define HEADER_TEXT_GID "X-Object-Meta-Gid"
-#define HEADER_TEXT_FILEPATH "X-Object-Meta-FilePath"
+extern size_t file_buffer_size;
+
+typedef struct metadataItem
+{
+  struct stringMapItem item;
+  char* value;
+  size_t size;
+  char* encoded;
+  size_t esize;
+} metadataItem;
+
+// metatdata support
+#define HEADER_TEXT_META "X-Object-Meta-"
+#define HEADER_TEXT_META_XATTR HEADER_TEXT_META "Xattr-"
+#define HEADER_TEXT_MTIME HEADER_TEXT_META "Mtime"
+#define HEADER_TEXT_ATIME HEADER_TEXT_META "Atime"
+#define HEADER_TEXT_CTIME HEADER_TEXT_META "Ctime"
+#define HEADER_TEXT_MTIME_DISPLAY HEADER_TEXT_MTIME "-Display"
+#define HEADER_TEXT_ATIME_DISPLAY HEADER_TEXT_ATIME "-Display"
+#define HEADER_TEXT_CTIME_DISPLAY HEADER_TEXT_CTIME "-Display"
+#define HEADER_TEXT_CHMOD HEADER_TEXT_META "Chmod"
+#define HEADER_TEXT_UID HEADER_TEXT_META "Uid"
+#define HEADER_TEXT_GID HEADER_TEXT_META "Gid"
+#define HEADER_TEXT_FILEPATH HEADER_TEXT_META "FilePath"
 #define TEMP_FILE_NAME_FORMAT "%s/.cloudfuse_%s"
 #define HUBIC_DATE_FORMAT "%Y-%m-%d %T."
-
-
 
 //linked list with files in a directory
 typedef struct dir_entry
@@ -40,6 +51,9 @@ typedef struct dir_entry
   mode_t chmod;
   uid_t uid;
   gid_t gid;
+  stringMap* xattrs;
+  stringMap* raw_xattrs;
+  stringMap* unknown_metas;
   bool issegmented;
   time_t accessed_in_cache;//todo: cache support based on access time
   bool metadata_downloaded;
@@ -62,10 +76,22 @@ typedef struct dir_cache
   struct dir_cache *next, *prev;
 } dir_cache;
 
-time_t my_timegm(struct tm *tm);
-time_t get_time_from_str_as_gmt(char *time_str);
-time_t get_time_as_local(time_t time_t_val, char time_str[], int char_buf_size);
-int get_time_as_string(time_t time_t_val, long nsec, char *time_str, int time_str_len);
+metadataItem* metadata_new();
+metadataItem* metadata_new_encoded(const char* value);
+metadataItem* metadata_new_xattr(const char* key, const char* value,
+                                 size_t size);
+metadataItem* metadata_new_xattr_encoded(const char* value, char** key);
+void metadata_copy(const char* key, void* item, void* param);
+void metadata_delete(void* item);
+
+bool is_unknown_meta(const char* head);
+
+time_t my_timegm(struct tm* tm);
+time_t get_time_from_str_as_gmt(char* time_str);
+time_t get_time_as_local(time_t time_t_val, char time_str[],
+                         int char_buf_size);
+int get_time_as_string(time_t time_t_val, long nsec, char* time_str,
+                       int time_str_len);
 time_t get_time_now();
 int get_timespec_as_str(const struct timespec *times, char *time_str, int time_str_len);
 char *str2md5(const char *str, int length);

@@ -105,19 +105,21 @@ static void add_header(curl_slist **headers, const char *name,
                        const char *value)
 {
   char x_header[MAX_HEADER_SIZE];
-  char safe_value[256];
-  const char *value_ptr;
+  char safe_value[MAX_HEADER_LENGTH];
+  const char* value_ptr;
 
   debugf(DBG_LEVEL_EXT, "add_header(%s:%s)", name, value);
-  if (strlen(value) > 256) {
-    debugf(DBG_LEVEL_NORM, KRED"add_header: warning, value size > 256 (%s:%s) ", name, value);
+  if (strlen(value) > MAX_HEADER_LENGTH)
+  {
+    debugf(DBG_LEVEL_NORM, KRED"add_header: warning, value size > 256 (%s:%s) ",
+           name, value);
     //hubic will throw an HTTP 400 error on X-Copy-To operation if X-Object-Meta-FilePath header value is larger than 256 chars
     //fix for issue #95 https://github.com/TurboGit/hubicfuse/issues/95
     if (!strcasecmp(name, "X-Object-Meta-FilePath")) {
       debugf(DBG_LEVEL_NORM, KRED"add_header: trimming header (%s) value to max allowed", name);
       //trim header size to max allowed
-      strncpy(safe_value, value, 256 - 1);
-      safe_value[255] = '\0';
+      strncpy(safe_value, value, MAX_HEADER_LENGTH - 1);
+      safe_value[MAX_HEADER_LENGTH - 1] = '\0';
       value_ptr = safe_value;
     }
     else
@@ -198,28 +200,45 @@ static size_t header_get_meta_dispatch(void *ptr, size_t size, size_t nmemb, voi
     if (de != NULL) 
     {
       if (!strncasecmp(head, HEADER_TEXT_ATIME, size * nmemb))
-      {
         header_set_time_from_str(value, &de->atime);
-      }
-      if (!strncasecmp(head, HEADER_TEXT_CTIME, size * nmemb))
-      {
+      else if (!strncasecmp(head, HEADER_TEXT_CTIME, size * nmemb))
         header_set_time_from_str(value, &de->ctime);
-      }
-      if (!strncasecmp(head, HEADER_TEXT_MTIME, size * nmemb))
-      {
+      else if (!strncasecmp(head, HEADER_TEXT_MTIME, size * nmemb))
         header_set_time_from_str(value, &de->mtime);
-      }
-      if (!strncasecmp(head, HEADER_TEXT_CHMOD, size * nmemb))
-      {
+      else if (!strncasecmp(head, HEADER_TEXT_CHMOD, size * nmemb))
         de->chmod = atoi(value);
-      }
-      if (!strncasecmp(head, HEADER_TEXT_GID, size * nmemb))
-      {
+      else if (!strncasecmp(head, HEADER_TEXT_GID, size * nmemb))
         de->gid = atoi(value);
-      }
-      if (!strncasecmp(head, HEADER_TEXT_UID, size * nmemb))
-      {
+      else if (!strncasecmp(head, HEADER_TEXT_UID, size * nmemb))
         de->uid = atoi(value);
+      else if (!strncasecmp(head, HEADER_TEXT_META_XATTR,
+                            strlen(HEADER_TEXT_META_XATTR)))
+      {
+        char id[16];
+        int run;
+        sscanf(head + strlen(HEADER_TEXT_META_XATTR), "%[^.].%d", id, &run);
+        debugf(DBG_LEVEL_EXT, KCYN "Received Xattr-Meta %s.%d", id, run);
+        metadataItem* item = stringMap_get(de->raw_xattrs, id);
+        if (!item)
+        {
+          item = metadata_new();
+          stringMap_put(de->raw_xattrs, id, item);
+        }
+        int s = strlen(value);
+        int ts = run * MAX_HEADER_LENGTH + s + 1;
+        if (item->esize < ts)
+        {
+          item->esize = ts;
+          item->encoded = realloc(item->encoded, ts);
+          item->encoded[ts - 1] = 0;
+        }
+        memcpy(item->encoded + run * MAX_HEADER_LENGTH, value, s);
+      }
+      else if (de->unknown_metas && is_unknown_meta(head))
+      {
+        //An unknown meta
+        debugf(DBG_LEVEL_EXT, KCYN "Unknown meta %s:%s", head, value);
+        stringMap_put(de->unknown_metas, head, metadata_new_encoded(value));
       }
     }
     else {
@@ -320,6 +339,54 @@ size_t writefunc_callback(void *contents, size_t size, size_t nmemb, void *userp
   return realsize;
 }
 
+typedef struct metadata_addheader_param
+{
+  int count;
+  curl_slist** headers;
+} metadata_addheader_param;
+
+void metadata_xattr_addheader(const char* key, void* it, void* p)
+{
+  metadataItem* item = (metadataItem*) it;
+  metadata_addheader_param* param = (metadata_addheader_param*) p;
+  char head[MAX_PATH_SIZE];
+  char arg[MAX_HEADER_LENGTH + 1];
+  int run = 0;
+  int rem = item->esize;
+  const char* loc = item->encoded;
+  while (rem)
+  {
+    int s = rem;
+    if (s > MAX_HEADER_LENGTH) s = MAX_HEADER_LENGTH;
+    memcpy(arg, loc, s);
+    arg[s] = 0;
+    snprintf(head, MAX_PATH_SIZE, HEADER_TEXT_META_XATTR "%d.%d", param->count,
+             run);
+    add_header(param->headers, head, arg);
+    rem -= s;
+    loc += s;
+    run++;
+  }
+  param->count++;
+}
+
+void metadata_xattr_decode(const char* key, void* it, void* p)
+{
+  metadataItem* rawitem = (metadataItem*)it;
+  stringMap* map = (stringMap*)p;
+  char* name = NULL;
+  metadataItem* item = metadata_new_xattr_encoded(rawitem->encoded, &name);
+  if (item != NULL) stringMap_put(map, name, item);
+  free(name);
+}
+
+void metadata_unknown_addheader(const char* key, void* it, void* p)
+{
+  metadataItem* item = (metadataItem*) it;
+  metadata_addheader_param* param = (metadata_addheader_param*) p;
+  add_header(param->headers, key, item->encoded);
+}
+
 // de_cached_entry must be NULL when the file is already in global cache
 // otherwise point to a new dir_entry that will be added to the cache (usually happens on first dir load)
 static int send_request_size(const char *method, const char *path, void *fp,
@@ -331,6 +398,7 @@ static int send_request_size(const char *method, const char *path, void *fp,
   char url[MAX_URL_SIZE];
   char orig_path[MAX_URL_SIZE];
   char header_data[MAX_HEADER_SIZE];
+  bool raw_xattrs = false;
 
   char *slash;
   long response = -1;
@@ -386,12 +454,14 @@ static int send_request_size(const char *method, const char *path, void *fp,
       debugf(DBG_LEVEL_EXTALL, "send_request_size: using param dir_entry(%s)", orig_path);
     }
     if (!de)
+      debugf(DBG_LEVEL_EXTALL,
+             "send_request_size: "KYEL"file not in cache (%s)(%s)(%s)", orig_path, path,
+             unencoded_path);
+    else
     {
-      debugf(DBG_LEVEL_EXTALL, "send_request_size: "KYEL"file not in cache (%s)(%s)(%s)", orig_path, path, unencoded_path);
-    }
-    else {
-      // add headers to save utimens attribs only on upload
-      if (!strcasecmp(method, "PUT") || !strcasecmp(method, "MKDIR"))
+      // add headers to save meta attribs only on upload
+      if (!strcasecmp(method, "PUT") || !strcasecmp(method, "POST")
+          || !strcasecmp(method, "MKDIR"))
       {
         debugf(DBG_LEVEL_EXTALL, "send_request_size: Saving utimens for file %s", orig_path);
         debugf(DBG_LEVEL_EXTALL, "send_request_size: Cached utime for path=%s ctime=%li.%li mtime=%li.%li atime=%li.%li", orig_path,
@@ -425,6 +495,13 @@ static int send_request_size(const char *method, const char *path, void *fp,
         add_header(&headers, HEADER_TEXT_GID, gid_str);
         add_header(&headers, HEADER_TEXT_UID, uid_str);
         add_header(&headers, HEADER_TEXT_CHMOD, chmod_str);
+
+        metadata_addheader_param p = {0, &headers};
+        stringMap_iterate(de->xattrs, metadata_xattr_addheader, &p);
+
+        if (de->unknown_metas)
+          stringMap_iterate(de->unknown_metas, metadata_unknown_addheader, &p);
+
       }
       else {
         debugf(DBG_LEVEL_EXTALL, "send_request_size: not setting utimes (%s)", orig_path);
@@ -473,6 +550,13 @@ static int send_request_size(const char *method, const char *path, void *fp,
       /* we pass our 'chunk' struct to the callback function */
       curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
     }
+    else if (!strcasecmp(method, "POST"))
+    {
+      debugf(DBG_LEVEL_EXT, "send_request_size: POST (%s)", orig_path);
+      curl_easy_setopt(curl, CURLOPT_POST, 1);
+      //curl_easy_setopt(curl, CURLOPT_UPLOAD, 1);
+      //curl_easy_setopt(curl, CURLOPT_INFILESIZE, 0);
+    }
     else if (!strcasecmp(method, "GET"))
     {
       if (is_segment)
@@ -496,6 +580,7 @@ static int send_request_size(const char *method, const char *path, void *fp,
         // sample by UThreadCurl.cpp, https://bitbucket.org/pamungkas5/bcbcurl/src
         // and http://www.codeproject.com/Articles/838366/BCBCurl-a-LibCurl-based-download-manager
         curl_easy_setopt(curl, CURLOPT_HEADERDATA, (void *)de);
+        raw_xattrs = true;
 
         struct curl_progress prog;
         prog.lastruntime = 0;
@@ -513,7 +598,8 @@ static int send_request_size(const char *method, const char *path, void *fp,
         //asumming retrieval of headers only
         debugf(DBG_LEVEL_EXT, "send_request_size: GET HEADERS only(%s)");
         curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, &header_get_meta_dispatch);
-        curl_easy_setopt(curl, CURLOPT_HEADERDATA, (void *)de);
+        curl_easy_setopt(curl, CURLOPT_HEADERDATA, (void*)de);
+        raw_xattrs = true;
         curl_easy_setopt(curl, CURLOPT_NOBODY, 1);
       }
     }
@@ -558,8 +644,16 @@ static int send_request_size(const char *method, const char *path, void *fp,
 
     if ((response >= 200 && response < 400) || (!strcasecmp(method, "DELETE") && response == 409)) 
     {
-      debugf(DBG_LEVEL_NORM, "exit 0: send_request_size(%s) speed=%.1f sec "KCYN"(%s) "KGRN"[HTTP OK]", 
-        orig_path, total_time, method);
+      if (raw_xattrs)
+      {
+        stringMap_clear(de->xattrs);
+        stringMap_iterate(de->raw_xattrs, metadata_xattr_decode, de->xattrs);
+        stringMap_clear(de->raw_xattrs);
+      }
+
+      debugf(DBG_LEVEL_NORM,
+             "exit 0: send_request_size(%s) speed=%.1f sec "KCYN"(%s) "KGRN"[HTTP OK]",
+             orig_path, total_time, method);
       return response;
     }
     //handle cases when file is not found, no point in retrying, will exit
@@ -1126,7 +1220,7 @@ int cloudfs_list_directory(const char *path, dir_entry **dir_list)
     curl_free(encoded_object);
   }
 
-  if ((!strcmp(path, "") || !strcmp(path, "/")) && *override_storage_url)
+  if ((!strcmp(path, "") || !strcmp(path, "/")) && options->override_storage_url)
     response = 404;
   else {
     // this was generating 404 err on non segmented files (small files)
@@ -1347,7 +1441,11 @@ int cloudfs_copy_object(const char *src, const char *dst)
 // http://developer.openstack.org/api-ref-objectstorage-v1.html#updateObjectMeta
 int cloudfs_update_meta(dir_entry *de)
 {
-  int response = cloudfs_copy_object(de->full_name, de->full_name);
+  //int response = cloudfs_copy_object(de->full_name, de->full_name);
+  char* path = de->full_name;
+  char* encoded = curl_escape(path, 0);
+  int response = send_request("POST", encoded, NULL, NULL, NULL, NULL, path);
+  curl_free(encoded);
   return response;
 }
 
@@ -1356,7 +1454,7 @@ int cloudfs_statfs(const char *path, struct statvfs *stat)
 {
   time_t now = get_time_now();
   int lapsed = now - last_stat_read_time;
-  if (lapsed > option_cache_statfs_timeout)
+  if (lapsed > options->cache_statfs_timeout)
   {
     //todo: check why stat head request is always set to /, why not path?
     int response = send_request("HEAD", "/", NULL, NULL, NULL, NULL, "/");
